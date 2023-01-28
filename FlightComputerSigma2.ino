@@ -3,6 +3,7 @@
 #include "SPI.h"
 #include "Wire.h"
 #include "SPIFFS.h"
+#include <PID_v1.h>
 #include <MPU6050_light.h>
 #include <Adafruit_BMP280.h>
 #include <Adafruit_NeoPixel.h>
@@ -10,7 +11,6 @@
   #include <avr/power.h>
 #endif
 
-#define BUZZZER_PIN  17
 #define LED_PIN    16
 #define LED_COUNT 1
 
@@ -19,23 +19,26 @@ MPU6050 mpu(Wire);
 Adafruit_BMP280 bmp;
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
+//Contantes y objeto para el PID
+double RW_Setpoint, RW_Input, RW_Output;
+PID RW_PID(&RW_Input, &RW_Output, &RW_Setpoint, 2, 1, 1, DIRECT);
+
 //Constantes para la reaction wheel
 const int freq = 30000;
 const int pwmChannel = 0;
 const int resolution = 8;
-int dutyCycle = 255; //Velocidad con ledcWrite(pwmChannel, dutyCycle); (Para alante)
-int motor1Pin1 = 27; 
-int motor1Pin2 = 26; 
-int enable1Pin = 14;
-bool invertirRotacion = false;
+const int motor1Pin1 = 27; 
+const int motor1Pin2 = 26; 
+const int enable1Pin = 14;
+const bool invertirRotacion = false;
 int low = LOW;
 int high = HIGH;
+int dutyCycle = 255; //Velocidad con ledcWrite(pwmChannel, dutyCycle); (Para alante)
 
-//Buscar tono de las notas en internet, por ejemplo 262 = C4
-int melodyOk[] = {262, 0, 0, 0, 0, 0, 0, 0};
-int noteDurationsOk[] = {4, 8, 8, 4, 4, 4, 4, 4};
-int melodyError[] = {262, 262, 262, 262, 262, 0, 262, 262};
-int noteDurationsError[] = {4, 8, 8, 4, 4, 4, 4, 4};
+//Constantes para mechas
+const int mecha1 = 25;
+const int mecha2 = 32;
+const int mecha3 = 33;
 
 String FileName = "/lecturas.csv";
 long timer = 0;
@@ -43,23 +46,6 @@ String instantData;
 int Status = 0;
 float AlturaLanzamiento = 0;
 bool hasCopiedFile = false;
-
-void Tone(byte pin, int freq) {
-  ledcSetup(0, 2000, 8); // setup beeper
-  ledcAttachPin(pin, 0); // attach beeper
-  ledcWriteTone(0, freq); // play Tone
-}
-
-void playMelody(int melody[], int noteDurations[]) {
-  for (int thisNote = 0; thisNote < 8; thisNote++) {
-    int noteDuration = 1000 / noteDurations[thisNote];
-    Tone(BUZZZER_PIN, melody[thisNote]);
-
-    int pauseBetweenNotes = noteDuration * 1.30;
-    delay(pauseBetweenNotes);
-    Tone(BUZZZER_PIN, 0);
-  }
-}
 
 void writeFile(fs::FS &fs, String path, String message){
     File file = fs.open(path, FILE_WRITE);
@@ -85,27 +71,18 @@ void appendFile(fs::FS &fs, String path, String message){
 
 
 void controlReactionWheel() {
-  if (0<mpu.getGyroZ()<100){
-    digitalWrite(motor1Pin1, low);
-    digitalWrite(motor1Pin2, high);
-    dutyCycle = map(mpu.getGyroZ(), 0, 100, 0, 255);
-  }
-  if (-100<mpu.getGyroZ()<0){
-    digitalWrite(motor1Pin1, high);
-    digitalWrite(motor1Pin2, low);
-    dutyCycle = map(mpu.getGyroZ(), -100, 0, 0, 255);
-  }
-  else if(mpu.getGyroZ() > 0) {
-    digitalWrite(motor1Pin1, low);
-    digitalWrite(motor1Pin2, high);
-    dutyCycle = 255;
-  }
-  else if (mpu.getGyroZ() < 0) {
-    digitalWrite(motor1Pin1, high);
-    digitalWrite(motor1Pin2, low);
-    dutyCycle = 255;
-  }
-  ledcWrite(pwmChannel, dutyCycle);
+    RW_Input = mpu.getGyroZ();
+    RW_PID.Compute();
+    if (RW_Output > 0) {
+      digitalWrite(motor1Pin1, low);
+      digitalWrite(motor1Pin2, high);
+      dutyCycle = RW_Output;
+    } else {
+      digitalWrite(motor1Pin1, high);
+      digitalWrite(motor1Pin2, low);
+      dutyCycle = -RW_Output;
+    }
+    ledcWrite(pwmChannel, dutyCycle);
 }
 
 void copyFileToSD(fs::FS &fs, String path){
@@ -117,11 +94,18 @@ void copyFileToSD(fs::FS &fs, String path){
   file2.close();
   file.close();
   hasCopiedFile = true;
+  Serial.println("Copied File");
+  strip.setPixelColor(0, strip.Color(255,255,255));
+  strip.show();
 }
 void deployParachute() {
   //Funcion de despliegue de paracaidas
-  
-  //playMelody(melodyOk, noteDurationsError);
+  digitalWrite(mecha1, HIGH);
+  digitalWrite(mecha2, HIGH);
+  digitalWrite(mecha3, HIGH);
+  strip.setPixelColor(0, strip.Color(255,0,255));
+  strip.show();
+  Serial.println("DEPLOYED!");
 }
 
 void setup(){
@@ -137,23 +121,23 @@ void setup(){
     //strip.show();
     //************************************************//
 
-    //SPIFFS Setup
-    if(!SPIFFS.begin(true)){
-        Serial.println("SPIFFS Mount Failed");
-        return;
+    //SPIFFS Setup (Memoria interna)
+    strip.setPixelColor(0, strip.Color(255,0,0));
+    strip.show();
+    while(!SPIFFS.begin(true)){
+        while (1) delay(10);
     }
     //SD Setup
     strip.setPixelColor(0, strip.Color(0,255,0));
     strip.show();
     if(!SD.begin()){
-        //playMelody(melodyError, noteDurationsError);
         strip.setPixelColor(0, strip.Color(255,0,255));
         strip.show();
+        Serial.println("ERROR SD");
         while (1) delay(10);
     }
     uint8_t cardType = SD.cardType();
     if(cardType == CARD_NONE){
-        //playMelody(melodyError, noteDurationsError);
         strip.setPixelColor(0, strip.Color(255,0,0));
         strip.show();
         while (1) delay(10);
@@ -169,7 +153,6 @@ void setup(){
     Wire.begin();
     byte status = mpu.begin();
     while(status!=0){  // stop everything if could not connect to MPU6050
-      //playMelody(melodyError, noteDurationsError);
       strip.setPixelColor(0, strip.Color(255,255,0));
       strip.show();
     }
@@ -177,7 +160,6 @@ void setup(){
     strip.setPixelColor(0, strip.Color(255,255,255));
     strip.show();
     mpu.calcOffsets(true,true); // gyro and accelero
-    //playMelody(melodyOk, noteDurationsError);
     strip.setPixelColor(0, strip.Color(0,255,0));
     strip.show();
 
@@ -195,6 +177,12 @@ void setup(){
                     Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                     Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
 
+    //PID Setup
+    RW_PID.SetMode(AUTOMATIC);
+    RW_PID.SetOutputLimits(-255,255);
+    RW_PID.SetSampleTime(50);
+    RW_Setpoint = 0;
+    
     //DC motor setup
     pinMode(motor1Pin1, OUTPUT);
     pinMode(motor1Pin2, OUTPUT);
@@ -205,6 +193,14 @@ void setup(){
       low = HIGH;
       high = LOW;
     }
+
+    //Setup mechas
+    pinMode(mecha1, OUTPUT);
+    pinMode(mecha2, OUTPUT);
+    pinMode(mecha3, OUTPUT);
+    digitalWrite(mecha1, LOW);
+    digitalWrite(mecha2, LOW);
+    digitalWrite(mecha3, LOW);
     
     writeFile(SPIFFS, FileName, "ACCELERO_X,ACCELERO_Y,ACCELERO_Z,GYRO_X,GYRO_Y,GYRO_Z,ACC_ANGLE_X,ACC_ANGLE_Y,ANGLE_X,ANGLE_Y,ANGLE_Z,TEMPERATURE,PREASSURE,HEIGHT,TIME,STATUS, \n");
 
@@ -226,7 +222,7 @@ void loop(){
                   "," + bmp.readTemperature() + "," + bmp.readPressure() + "," + bmp.readAltitude(1020.03) + 
                   "," + String(timer) + "," + String(Status) + "," + "\n";
     appendFile(SPIFFS, FileName, instantData);
-    if(mpu.getGyroX() > 90 || mpu.getGyroY() > 90 || mpu.getGyroX() < 90 || mpu.getGyroY() < 90){
+    if((mpu.getAngleX() > 80 || mpu.getAngleY() > 80 || mpu.getAngleX() < -80 || mpu.getAngleY() < -80) && Status == 0){
       Status=1;
       deployParachute();
     }
